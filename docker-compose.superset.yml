@@ -1,0 +1,30 @@
+# Overlay that attaches Auger to Superset's Docker network.
+#
+# Without it, Superset cannot reach Auger at all when both run in containers on
+# one host: the base file publishes 5433 on the host's loopback, and a
+# container's 127.0.0.1 is its own, not the host's.
+#
+#   docker network ls                                  # find Superset's network
+#   echo 'SUPERSET_NETWORK=superset_default' >> .env    # whatever it is called
+#   docker compose -f docker-compose.prod.yml -f docker-compose.superset.yml up -d
+#
+# Superset then resolves `auger` through Docker's embedded DNS:
+#
+#   postgresql+psycopg2://auger@auger:5433/<mongo-database>
+#
+# The port stays published on 127.0.0.1 as well, so psql on the host still
+# works for diagnosis — worth keeping, since it separates "Auger is broken"
+# from "Superset cannot see Auger", which look identical from a dashboard.
+
+services:
+  auger:
+    networks:
+      - default
+      - superset
+
+networks:
+  superset:
+    # Created and owned by Superset's own compose project. `external` means
+    # attach to it — never create it, never remove it on `down`.
+    name: ${SUPERSET_NETWORK:?set SUPERSET_NETWORK in .env - find it with "docker network ls"}
+    external: true

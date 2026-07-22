@@ -69,6 +69,48 @@ ssh -N -L 5433:localhost:5433 user@ubuntu-host
 # แล้วชี้ DBeaver / Power BI / Metabase ไปที่ localhost:5433
 ```
 
+## ต่อเข้า Superset
+
+Superset คุยกับ auger ผ่าน driver `postgresql+psycopg2` ที่ติดมากับ image อยู่แล้ว
+ไม่ต้องลง connector เพิ่มเหมือนตอนใช้ Drill
+
+ถ้า Superset รันใน Docker บนเครื่องเดียวกัน มันจะ **ต่อ `127.0.0.1:5433` ไม่ถึง**
+เพราะ loopback ที่เห็นจากใน container คือของ container เอง ไม่ใช่ของ host
+`docker-compose.superset.yml` แก้จุดนี้ด้วยการเอา auger ไปแปะบน network ของ
+Superset:
+
+```bash
+docker network ls                                   # หาชื่อ network ของ Superset
+echo 'SUPERSET_NETWORK=superset_default' >> .env    # ใส่ชื่อที่เจอจริง
+
+docker compose -f docker-compose.prod.yml -f docker-compose.superset.yml up -d
+```
+
+ยืนยันว่าเห็นกันจริงก่อนไปตั้งค่าใน UI — ถ้าข้ามขั้นนี้ อาการ "ต่อ network ไม่ได้"
+กับ "URI พิมพ์ผิด" จะแยกไม่ออก:
+
+```bash
+docker compose exec superset_app \
+    python -c "import socket; socket.create_connection(('auger',5433),5); print('ok')"
+```
+
+จากนั้นใน Superset ไปที่ **Settings → Database Connections → + Database →
+PostgreSQL** แล้วใส่:
+
+```
+postgresql+psycopg2://auger@auger:5433/<ชื่อ database ใน mongo>
+```
+
+ค่า database ท้าย URI แค่กำหนด schema เริ่มต้น — Mongo database ตัวอื่นที่เปิดไว้
+ใน `auger.toml` ยังมองเห็นเป็น schema อื่นใน SQL Lab อยู่ดี ชื่อตารางจึงเปลี่ยนจาก
+`mongo.shop.orders` ของ Drill เหลือ `shop.orders`
+
+**อย่าติ๊ก `Allow DML`, `Allow CTAS`, `Allow CVAS`** — auger เป็น read-only
+Superset จะพยายาม `CREATE TABLE` แล้วโดนปฏิเสธ
+
+ถ้า Superset ไม่ได้อยู่ใน Docker (ลงตรงบน host หรืออยู่คนละเครื่อง) ไม่ต้องใช้
+overlay นี้ — ดูหัวข้อความปลอดภัยด้านล่างเรื่องการเปิดพอร์ต
+
 ## ความปลอดภัย
 
 ค่า `auth = "trust"` ที่มาเป็นค่าเริ่มต้น หมายถึงรับทุก connection โดยไม่ถามรหัสผ่าน
