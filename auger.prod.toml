@@ -1,0 +1,76 @@
+# Production configuration for the container deployment. Copy to `auger.toml`;
+# docker-compose.prod.yml mounts that at /etc/auger/auger.toml.
+#
+# `auger.example.toml` documents every setting and its default. This file only
+# carries the ones worth revisiting for a real deployment.
+
+[server]
+# Left out on purpose — AUGER_LISTEN from compose sets 0.0.0.0:5433, which is
+# what a container needs. A value here would be overridden by it anyway.
+# listen = "0.0.0.0:5433"
+
+# "trust" accepts any connection without a password. That is safe only while
+# the published port stays on 127.0.0.1. Before exposing 5433 to anything
+# wider, switch to "scram" and fill in [server.users] below.
+auth = "trust"
+
+# [server.users]
+# analyst = "put-a-real-password-here"
+
+batch_size = 8192
+
+# A runaway dashboard query otherwise holds a Mongo cursor open indefinitely.
+# Checked between batches, so nothing is cut off mid-row.
+statement_timeout_secs = 300
+
+[mongo]
+# Deliberately absent: AUGER_MONGO_URI from .env supplies it, so credentials
+# never land in a file that could be committed.
+# uri = "mongodb://localhost:27017"
+
+# Expose only what the SQL clients need. Empty means every non-system database,
+# which on a shared cluster is usually more than you want sampled.
+# databases = ["shop"]
+
+# Prefix match with a trailing "*".
+exclude_collections = ["system.*"]
+
+# A cross-region Atlas connection needs more than the 10 s default.
+connect_timeout_secs = 20
+
+# Cap server-side work per operation so an unfiltered scan cannot pin the
+# cluster. Mirrors statement_timeout_secs above.
+server_timeout_secs = 300
+
+cursor_batch_size = 4096
+allow_disk_use = true
+
+[catalog]
+# Sampling reads real documents across the network. On a remote or Atlas
+# cluster that is the slowest part of startup; 1000 is a reasonable balance,
+# raise it if columns are being missed.
+sample_size = 1000
+recent_bias = 0.25
+max_depth = 4
+rare_field_threshold = 0.01
+
+# Set by AUGER_CATALOG_CACHE to /var/lib/auger/catalog.json, which the compose
+# file backs with a named volume. Uncomment only to move it elsewhere.
+# cache_path = "/var/lib/auger/catalog.json"
+
+# Re-infer hourly. Set to 0 to freeze schemas until the process restarts —
+# preferable when dashboards must never see a column change type.
+refresh_interval_secs = 3600
+
+[pushdown]
+filters = true
+aggregates = true
+sorts = true
+limits = true
+
+# 0 derives the split from collection size and container CPU count. Pin it if
+# the container is CPU-limited, since available_parallelism reports the host's
+# cores, not the cgroup quota.
+scan_parallelism = 0
+parallel_scan_min_docs = 100000
+explain_pipeline = true

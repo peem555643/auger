@@ -1,0 +1,97 @@
+# Auger configuration. Every value shown is the default, so an empty file
+# behaves identically to this one. Pass with `auger --config auger.toml`.
+
+[server]
+# Address the PostgreSQL wire listener binds to.
+listen = "127.0.0.1:5433"
+
+# "trust" accepts any user without a password. "md5" and "scram" check [server.users].
+auth = "trust"
+
+# Rows per Arrow batch handed to the wire encoder. Larger batches amortise
+# per-batch overhead; smaller ones reduce latency to the first row.
+batch_size = 8192
+
+# Abort a query still running after this many seconds. 0 disables.
+# Checked between batches, so a query is never cut off mid-row.
+statement_timeout_secs = 0
+
+# Only consulted when auth is "md5" or "scram".
+# [server.users]
+# analyst = "correct-horse-battery-staple"
+
+[mongo]
+uri = "mongodb://localhost:27017"
+
+# Databases exposed as SQL schemas. Empty means every non-system database.
+databases = []
+
+# Collections hidden from the catalog. A trailing "*" matches by prefix.
+exclude_collections = []
+
+connect_timeout_secs = 10
+
+# $maxTimeMS applied to every server-side operation. 0 disables.
+server_timeout_secs = 0
+
+cursor_batch_size = 4096
+
+# Let the server spill aggregation stages to disk rather than failing at the
+# 100 MB in-memory stage limit.
+allow_disk_use = true
+
+[catalog]
+# Documents sampled per collection when inferring a schema.
+sample_size = 1000
+
+# Fraction of the sample taken from the newest documents by _id rather than
+# uniformly at random. A pure $sample systematically misses recently added
+# fields: in a large collection, a field present only in the newest documents
+# has a vanishing chance of being drawn. Set to 0 to disable the recency pass.
+recent_bias = 0.25
+
+# Maximum nesting depth materialised as Arrow structs. Deeper subtrees become a
+# single JSON text column, so a pathological document cannot explode the schema.
+max_depth = 4
+
+# A field seen in fewer than this fraction of sampled documents is still
+# exposed, but is never trusted for Exact filter pushdown.
+rare_field_threshold = 0.01
+
+# Where inferred schemas persist. Without this, every restart re-samples and a
+# column's type can change underneath a running dashboard.
+# cache_path = "/var/lib/auger/catalog.json"
+
+# Re-infer a collection's schema after this long. 0 means never.
+refresh_interval_secs = 3600
+
+# Hand-written overrides that win over whatever sampling inferred. Use this when
+# a column has to have a specific type regardless of what the sample contained.
+# [[catalog.overrides."shop.orders"]]
+# path = "payload.amount"
+# sql_type = "BIGINT"
+# nullable = true
+
+[pushdown]
+# Translate WHERE into $match.
+filters = true
+
+# Translate GROUP BY into $group. Not yet implemented; see README roadmap.
+aggregates = true
+
+# Translate ORDER BY into $sort. Not yet implemented; see README roadmap.
+sorts = true
+
+# Translate LIMIT/OFFSET into $limit/$skip.
+limits = true
+
+# Split a single collection scan across N cursors using _id ranges.
+# 0 picks automatically from collection size and CPU count.
+scan_parallelism = 0
+
+# Do not split scans for collections smaller than this. Below this size the
+# extra connections cost more than the parallelism saves.
+parallel_scan_min_docs = 100000
+
+# Include the generated aggregation pipeline in EXPLAIN VERBOSE output.
+explain_pipeline = true

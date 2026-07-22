@@ -1,0 +1,48 @@
+# Development environment for Auger.
+#
+# The host has no C toolchain, so all compilation happens inside `dev`.
+# `target/` and the cargo registry live in named volumes rather than on the
+# bind mount — build I/O against a Windows bind mount is roughly an order of
+# magnitude slower, and neither directory needs to be visible from the host.
+
+services:
+  mongo:
+    image: mongo:8
+    container_name: auger-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  dev:
+    image: rust:1.95-bookworm
+    container_name: auger-dev
+    working_dir: /work
+    volumes:
+      - .:/work
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target:/work/target
+    environment:
+      AUGER_MONGO_URI: mongodb://mongo:27017
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: "1"
+    # Expose the SQL port so a client on the host can reach the gateway.
+    ports:
+      - "5433:5433"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    command: sleep infinity
+
+volumes:
+  mongo-data:
+  cargo-registry:
+  cargo-git:
+  target:

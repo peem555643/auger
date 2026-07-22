@@ -1,0 +1,55 @@
+# Production deployment on Ubuntu. MongoDB lives elsewhere (another server or
+# Atlas), so nothing but the gateway runs here.
+#
+#   cp .env.example .env && $EDITOR .env      # Mongo URI goes here, not in git
+#   cp auger.prod.toml auger.toml             # tuning goes here
+#   docker compose -f docker-compose.prod.yml up -d --build
+
+services:
+  auger:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: auger:0.1.0
+    container_name: auger
+    restart: unless-stopped
+
+    ports:
+      # Bound to loopback deliberately. The default auth mode is "trust", which
+      # accepts any user without a password — publishing 5433 to the world with
+      # that setting hands out read access to every collection. Reach it over an
+      # SSH tunnel, or switch auth to "scram" in auger.toml before widening this
+      # to "5433:5433".
+      - "127.0.0.1:5433:5433"
+
+    environment:
+      # Overrides mongo.uri from the config file, so credentials stay out of
+      # any file that might be committed. Required — compose refuses to start
+      # without it rather than silently dialling localhost.
+      AUGER_MONGO_URI: ${AUGER_MONGO_URI:?set AUGER_MONGO_URI in .env}
+      AUGER_LISTEN: 0.0.0.0:5433
+      AUGER_LOG: ${AUGER_LOG:-info}
+
+    volumes:
+      - ./auger.toml:/etc/auger/auger.toml:ro
+      # Inferred schemas persist here. Without it, every restart re-samples and
+      # a column's type can shift underneath a running dashboard.
+      - auger-catalog:/var/lib/auger
+
+    healthcheck:
+      # The listener accepting a connection is the only signal available
+      # without a psql client in the image.
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/5433' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  auger-catalog:

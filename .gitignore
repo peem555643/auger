@@ -1,0 +1,5 @@
+/target
+
+# Deployment secrets and the live config copied from auger.prod.toml.
+.env
+auger.toml

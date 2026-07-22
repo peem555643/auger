@@ -1,0 +1,17 @@
+# Keeping target/ out of the build context matters: it is gigabytes of host
+# artifacts that the Linux builder cannot use anyway, and every byte is sent
+# to the daemon before the build starts.
+target/
+.git/
+.gitignore
+
+# Never bake a real config — it carries the Mongo URI and any passwords.
+auger.toml
+.env
+
+*.ps1
+README.md
+DEPLOY.ubuntu.md
+docker-compose*.yml
+Dockerfile
+.dockerignore
