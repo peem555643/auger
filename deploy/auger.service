@@ -1,0 +1,75 @@
+[Unit]
+Description=Auger — SQL gateway for MongoDB (PostgreSQL wire protocol)
+Documentation=https://github.com/peem555643/auger
+# Auger dials MongoDB during startup to sample schemas, so it needs routing to
+# be up, not merely the interface to exist. network-online is what guarantees
+# that; plain network.target does not.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=auger
+Group=auger
+
+# Holds AUGER_MONGO_URI, so it carries the database credentials and must stay
+# 0600 root:root. systemd reads it as PID 1 before dropping to the auger user,
+# so the service account never needs access to the file itself.
+EnvironmentFile=/etc/auger/auger.env
+
+# The catalog cache lives under the StateDirectory below. Set here rather than
+# in the env file because it is a consequence of the unit's layout, not a
+# deployment choice.
+Environment=AUGER_CATALOG_CACHE=/var/lib/auger/catalog.json
+
+# Config::load has no default search path — the flag is not optional.
+ExecStart=/usr/local/bin/auger --config /etc/auger/auger.toml
+
+Restart=on-failure
+RestartSec=5s
+# There is no signal handler; SIGTERM terminates the process directly. Nothing
+# is buffered that a longer grace period would flush.
+TimeoutStopSec=20s
+
+# Creates /var/lib/auger owned by auger:auger on first start, and keeps it
+# across `systemctl restart`. Re-sampling on every restart would let a column
+# change type underneath a live dashboard.
+StateDirectory=auger
+StateDirectoryMode=0750
+
+# --- Hardening -------------------------------------------------------------
+# Auger reads two files, opens sockets, and writes one cache. Everything else
+# is denied. 5433 is above 1024, so no capability is needed to bind it.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+# AF_UNIX is here for glibc's resolver, which may talk to nscd/systemd-resolved
+# over a unix socket while resolving the MongoDB host.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+# Parallel scans open several MongoDB cursors at once, each with its own
+# connection, on top of one socket per SQL client.
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

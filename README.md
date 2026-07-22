@@ -145,9 +145,19 @@ client.
 
 See `auger.example.toml` for the full configuration surface.
 
-For a real deployment — a slim runtime image, an external MongoDB or Atlas, and
-the port bound where it cannot be reached by accident — see `DEPLOY.ubuntu.md`
-and `docker-compose.prod.yml`.
+For a real deployment there are two routes, both against an external MongoDB or
+Atlas and both binding the port where it cannot be reached by accident:
+
+- **Docker** — `DEPLOY.ubuntu.md` with `docker-compose.prod.yml`, plus
+  `docker-compose.superset.yml` to attach it to an existing Superset network.
+- **systemd** — `DEPLOY.systemd.md` with `deploy/install.sh`. One binary in
+  `/usr/local/bin`, one unit, no container. Worth preferring when the host has
+  no Docker already, or when clients live on other machines and a Docker
+  network buys nothing.
+
+Read the security note in whichever you pick before binding the port anywhere
+but loopback: there is no TLS, and `auth = "scram"` currently runs the same MD5
+handler as `auth = "md5"`.
 
 ## Layout
 

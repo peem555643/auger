@@ -1,0 +1,93 @@
+# Configuration for the systemd deployment. Installed to /etc/auger/auger.toml
+# as 0640 root:auger — it carries cleartext passwords, so it must not be
+# world-readable, and the service account needs only to read it.
+#
+# `auger.example.toml` documents every setting and its default. This file
+# carries the ones worth revisiting when Auger is reachable over a network.
+#
+# The config struct uses deny_unknown_fields: one misspelled key stops the
+# service at startup rather than being silently ignored. `auger --config this
+# --describe` is the cheap way to check it before `systemctl start`.
+
+[server]
+# "trust" accepts any connection without a password and is only defensible on
+# loopback. Anything reachable from another host needs a password.
+#
+# Be aware of what this actually is: `md5` and `scram` are the same code path
+# (server/mod.rs maps both to the MD5 handler), so either value performs
+# PostgreSQL MD5 authentication. It is challenge-response, so the password does
+# not cross the wire — but Auger has no TLS, so the queries and their results
+# do. On a network you do not control, tunnel it.
+auth = "md5"
+
+# Rows per Arrow batch handed to the wire encoder.
+batch_size = 8192
+
+# A runaway dashboard query otherwise holds a MongoDB cursor open indefinitely.
+# Checked between batches, so nothing is cut off mid-row.
+statement_timeout_secs = 300
+
+# `listen` is deliberately absent — AUGER_LISTEN in /etc/auger/auger.env sets
+# it, so how far this deployment is exposed is decided in one place, next to
+# the credentials it protects.
+# listen = "127.0.0.1:5433"
+
+# Cleartext, which is why this file is 0640. One account per consumer, so
+# rotating one does not take every dashboard down at once.
+[server.users]
+superset = "CHANGEME"
+
+[mongo]
+# `uri` is deliberately absent — AUGER_MONGO_URI in /etc/auger/auger.env
+# supplies it, so the MongoDB credential lives in exactly one 0600 file.
+# uri = "mongodb://localhost:27017"
+
+# Expose only what the SQL clients need. Empty means every non-system database,
+# which on a shared cluster is more than you want sampled on every start.
+databases = ["CHANGEME"]
+
+# Prefix match with a trailing "*".
+exclude_collections = ["system.*"]
+
+# A MongoDB on another host needs more than the 10 s default.
+connect_timeout_secs = 20
+
+# $maxTimeMS on every server-side operation, so an unfiltered scan cannot pin
+# the cluster. Mirrors statement_timeout_secs above.
+server_timeout_secs = 300
+
+cursor_batch_size = 4096
+allow_disk_use = true
+
+[catalog]
+# Sampling reads real documents across the network, and is the slowest part of
+# startup against a remote cluster. Raise it if columns are being missed.
+sample_size = 1000
+recent_bias = 0.25
+max_depth = 4
+rare_field_threshold = 0.01
+
+# `cache_path` is set by AUGER_CATALOG_CACHE in the unit, pointing into the
+# StateDirectory systemd creates and owns.
+# cache_path = "/var/lib/auger/catalog.json"
+
+# Re-infer hourly. Set to 0 to freeze schemas until the service restarts —
+# preferable when dashboards must never see a column change type. There is no
+# way to force a refresh short of a restart, so 0 means exactly that.
+refresh_interval_secs = 3600
+
+[pushdown]
+filters = true
+limits = true
+
+# Accepted by the parser but not yet wired to anything — no code reads them, so
+# GROUP BY and ORDER BY run in DataFusion after the scan either way. Left set
+# so this file matches auger.example.toml rather than looking as though the
+# settings were forgotten.
+aggregates = true
+sorts = true
+
+# 0 derives the split from collection size and CPU count.
+scan_parallelism = 0
+parallel_scan_min_docs = 100000
+explain_pipeline = true

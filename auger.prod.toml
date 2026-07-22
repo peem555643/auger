@@ -11,7 +11,12 @@
 
 # "trust" accepts any connection without a password. That is safe only while
 # the published port stays on 127.0.0.1. Before exposing 5433 to anything
-# wider, switch to "scram" and fill in [server.users] below.
+# wider, switch to "md5" and fill in [server.users] below.
+#
+# "scram" is accepted but is not SCRAM: server/mod.rs maps it to the same MD5
+# handler as "md5". Neither is TLS — Auger has none, so the password is
+# challenge-response but the queries and results are in the clear. On a network
+# you do not control, tunnel it rather than relying on this setting.
 auth = "trust"
 
 # [server.users]
