@@ -1,0 +1,10 @@
+# The repo is edited on Windows and built and run on Linux. Without this,
+# core.autocrlf=true writes CRLF into blobs on a future commit, and a CRLF
+# Dockerfile or shell script fails on the target with a diagnostic that points
+# nowhere near the real cause ("/usr/bin/env: 'bash\r': No such file").
+* text=auto eol=lf
+
+# Binary-ish files that must never be touched by line-ending conversion.
+*.png binary
+*.jpg binary
+*.ico binary
