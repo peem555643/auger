@@ -73,17 +73,94 @@ pub fn intercept(sql: &str) -> Option<Intercepted> {
         | "REVOKE" => None,
 
         _ => {
+            // Nothing below touches a statement that never mentions a catalog
+            // relation or function, which is almost every real query.
+            if !upper.contains("PG_") {
+                return None;
+            }
             // `SELECT pg_catalog.version()` and friends carry a schema
             // qualifier that DataFusion resolves as a table reference.
-            if upper.contains("PG_CATALOG.") {
-                let rewritten = strip_pg_catalog_prefix(trimmed);
-                if rewritten != trimmed {
-                    return Some(Intercepted::Rewritten(rewritten));
-                }
+            let mut rewritten = if upper.contains("PG_CATALOG.") {
+                strip_pg_catalog_prefix(trimmed)
+            } else {
+                trimmed.to_string()
+            };
+            // A driver writes `FROM pg_type` and means `pg_catalog.pg_type`,
+            // because PostgreSQL keeps pg_catalog on the search path. DataFusion
+            // has none, so the qualifier has to be put back or the query fails
+            // with "table not found". SQLAlchemy reflection — and therefore
+            // Superset — depends on this.
+            rewritten = qualify_bare_pg_catalog(&rewritten);
+            if rewritten != trimmed {
+                return Some(Intercepted::Rewritten(rewritten));
             }
             None
         }
     }
+}
+
+/// System-catalog relations Auger emulates as views in the `pg_catalog` schema.
+const PG_CATALOG_RELATIONS: &[&str] =
+    &["pg_namespace", "pg_class", "pg_attribute", "pg_type", "pg_index", "pg_roles"];
+
+/// Qualify bare references to the emulated `pg_catalog` relations.
+///
+/// A name is rewritten only where it stands alone as an identifier. One
+/// preceded by `.` — a column such as `t.pg_type`, or an already-qualified
+/// `pg_catalog.pg_type` — is left alone, as is any occurrence inside a string
+/// literal. The scan works on bytes and copies non-ASCII (UTF-8 inside a
+/// literal) through untouched.
+fn qualify_bare_pg_catalog(sql: &str) -> String {
+    let b = sql.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(sql.len());
+    let mut i = 0;
+    let mut in_quote = false;
+    // Last non-whitespace byte emitted; decides whether an identifier is bare.
+    let mut prev = b' ';
+
+    while i < b.len() {
+        let c = b[i];
+
+        if in_quote {
+            out.push(c);
+            if c == b'\'' {
+                in_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'\'' {
+            in_quote = true;
+            out.push(c);
+            prev = c;
+            i += 1;
+            continue;
+        }
+
+        let starts_ident = c.is_ascii_alphabetic() || c == b'_';
+        let attached = prev == b'.' || prev.is_ascii_alphanumeric() || prev == b'_';
+        if starts_ident && !attached {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let ident = &sql[start..i];
+            if PG_CATALOG_RELATIONS.iter().any(|r| r.eq_ignore_ascii_case(ident)) {
+                out.extend_from_slice(b"pg_catalog.");
+            }
+            out.extend_from_slice(ident.as_bytes());
+            prev = b[i - 1];
+            continue;
+        }
+
+        out.push(c);
+        if !c.is_ascii_whitespace() {
+            prev = c;
+        }
+        i += 1;
+    }
+
+    String::from_utf8(out).unwrap_or_else(|_| sql.to_string())
 }
 
 /// Remove `pg_catalog.` qualifiers that precede a function call.
@@ -244,8 +321,18 @@ async fn register_pg_catalog(ctx: &SessionContext) -> anyhow::Result<()> {
            FROM information_schema.columns"#,
         // Enough of pg_type for a client to label the types it will actually
         // receive; see `server::encode::pg_type_of` for the mapping.
+        //
+        // typnamespace and typarray exist so psycopg2's hstore probe — the
+        // first thing SQLAlchemy runs on connect, `SELECT t.oid, typarray FROM
+        // pg_type t JOIN pg_namespace ns ON typnamespace = ns.oid WHERE typname
+        // = 'hstore'` — plans and returns nothing rather than failing on a
+        // missing column. Every emulated type lives in pg_catalog, and none is
+        // an array element type, so the values are constant.
         r#"CREATE OR REPLACE VIEW pg_catalog.pg_type AS
-           SELECT * FROM (VALUES
+           SELECT oid, typname, typtype, typlen,
+                  auger_oid('pg_catalog') AS typnamespace,
+                  0                        AS typarray
+           FROM (VALUES
                (16,   'bool',        'b', 1),
                (17,   'bytea',       'b', 1),
                (20,   'int8',        'b', 8),
@@ -316,6 +403,45 @@ mod tests {
             strip_pg_catalog_prefix(sql),
             "SELECT version(), current_schema() FROM pg_catalog.pg_type"
         );
+    }
+
+    #[test]
+    fn bare_catalog_relations_are_qualified() {
+        // The psycopg2 hstore probe SQLAlchemy runs on connect: both relations
+        // are bare, the aliases and columns must be left alone, and the string
+        // literal must not be touched.
+        assert_eq!(
+            qualify_bare_pg_catalog(
+                "SELECT t.oid, typarray FROM pg_type t \
+                 JOIN pg_namespace ns ON typnamespace = ns.oid WHERE typname = 'hstore'"
+            ),
+            "SELECT t.oid, typarray FROM pg_catalog.pg_type t \
+             JOIN pg_catalog.pg_namespace ns ON typnamespace = ns.oid WHERE typname = 'hstore'"
+        );
+    }
+
+    #[test]
+    fn qualification_reaches_intercept() {
+        assert_eq!(
+            intercept("SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg_%'"),
+            Some(Intercepted::Rewritten(
+                "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg_%'".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn already_qualified_and_data_relations_are_left_alone() {
+        // Preceded by `.`, so not bare — unchanged, and intercept returns None.
+        assert_eq!(qualify_bare_pg_catalog("SELECT * FROM pg_catalog.pg_class"),
+                   "SELECT * FROM pg_catalog.pg_class");
+        assert_eq!(intercept("SELECT * FROM pg_catalog.pg_class"), None);
+        // A collection that merely contains the substring is not a catalog name.
+        assert_eq!(qualify_bare_pg_catalog("SELECT * FROM pg_type_log"),
+                   "SELECT * FROM pg_type_log");
+        // A column reference with a matching name is not the relation.
+        assert_eq!(qualify_bare_pg_catalog("SELECT t.pg_type FROM things t"),
+                   "SELECT t.pg_type FROM things t");
     }
 
     #[test]
