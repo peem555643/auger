@@ -115,7 +115,9 @@ fn qualify_bare_pg_catalog(sql: &str) -> String {
     let mut out: Vec<u8> = Vec::with_capacity(sql.len());
     let mut i = 0;
     let mut in_quote = false;
-    // Last non-whitespace byte emitted; decides whether an identifier is bare.
+    // The byte immediately before the current position. Whitespace must count:
+    // in `FROM pg_type` the char before the name is a space, which is exactly
+    // what makes the name bare rather than attached to another identifier.
     let mut prev = b' ';
 
     while i < b.len() {
@@ -126,6 +128,7 @@ fn qualify_bare_pg_catalog(sql: &str) -> String {
             if c == b'\'' {
                 in_quote = false;
             }
+            prev = c;
             i += 1;
             continue;
         }
@@ -138,6 +141,8 @@ fn qualify_bare_pg_catalog(sql: &str) -> String {
         }
 
         let starts_ident = c.is_ascii_alphabetic() || c == b'_';
+        // Attached to a preceding identifier or a qualifier dot — `t.pg_type`,
+        // `pg_catalog.pg_type`, `xpg_type` — so not a bare catalog reference.
         let attached = prev == b'.' || prev.is_ascii_alphanumeric() || prev == b'_';
         if starts_ident && !attached {
             let start = i;
@@ -154,9 +159,7 @@ fn qualify_bare_pg_catalog(sql: &str) -> String {
         }
 
         out.push(c);
-        if !c.is_ascii_whitespace() {
-            prev = c;
-        }
+        prev = c;
         i += 1;
     }
 
