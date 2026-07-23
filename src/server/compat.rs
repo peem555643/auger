@@ -59,6 +59,12 @@ pub fn intercept(sql: &str) -> Option<Intercepted> {
         "LISTEN" => Some(Intercepted::Tag("LISTEN".into())),
         "UNLISTEN" => Some(Intercepted::Tag("UNLISTEN".into())),
 
+        // Unlike SET, SHOW must return the value as a row: SQLAlchemy reads
+        // `SHOW transaction isolation level` during initialize and fails the
+        // whole connection if it errors. DataFusion only knows its own config
+        // variables, so the GUC is answered from a table of defaults instead.
+        "SHOW" => Some(rewrite_show(trimmed)),
+
         // A read-only gateway has nothing to roll back, but clients that wrap
         // every statement in a transaction must still see it succeed.
         "BEGIN" | "START" => Some(Intercepted::Tag("BEGIN".into())),
@@ -97,6 +103,46 @@ pub fn intercept(sql: &str) -> Option<Intercepted> {
             None
         }
     }
+}
+
+/// Answer a `SHOW` by selecting a constant, since DataFusion only recognises
+/// its own configuration variables and errors on a PostgreSQL GUC.
+///
+/// The value matters for a few of these — SQLAlchemy validates the isolation
+/// level against a known set, and clients parse `server_version` — so the ones
+/// that drivers actually read on connect carry a truthful default. An unknown
+/// variable returns the empty string rather than an error, which is what keeps
+/// a client's optional probes from failing the connection.
+fn rewrite_show(sql: &str) -> Intercepted {
+    // Everything after the leading SHOW token, normalised. PostgreSQL spells
+    // some GUCs with spaces (`transaction isolation level`) and some with
+    // underscores (`standard_conforming_strings`); both arrive here.
+    let arg = sql
+        .splitn(2, char::is_whitespace)
+        .nth(1)
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches(';')
+        .trim()
+        .to_ascii_lowercase();
+
+    let (col, val) = match arg.as_str() {
+        "transaction isolation level" => ("transaction_isolation", "read committed"),
+        "server_version" => ("server_version", SERVER_VERSION),
+        "server_encoding" => ("server_encoding", "UTF8"),
+        "client_encoding" => ("client_encoding", "UTF8"),
+        "standard_conforming_strings" => ("standard_conforming_strings", "on"),
+        "timezone" | "time zone" => ("TimeZone", "UTC"),
+        "datestyle" => ("DateStyle", "ISO, MDY"),
+        "search_path" => ("search_path", "\"$user\", public"),
+        "is_superuser" => ("is_superuser", "off"),
+        // Unknown GUC: an empty single-column row, never an error.
+        _ => ("value", ""),
+    };
+
+    // col and val are library constants above, never user text, so there is
+    // nothing to escape; the identifier is quoted to keep its case.
+    Intercepted::Rewritten(format!("SELECT '{val}' AS \"{col}\""))
 }
 
 /// System-catalog relations Auger emulates as views in the `pg_catalog` schema.
@@ -420,6 +466,29 @@ mod tests {
             ),
             "SELECT t.oid, typarray FROM pg_catalog.pg_type t \
              JOIN pg_catalog.pg_namespace ns ON typnamespace = ns.oid WHERE typname = 'hstore'"
+        );
+    }
+
+    #[test]
+    fn show_returns_a_row_not_an_error() {
+        // The probe SQLAlchemy fails the connection over.
+        assert_eq!(
+            intercept("SHOW transaction isolation level"),
+            Some(Intercepted::Rewritten(
+                "SELECT 'read committed' AS \"transaction_isolation\"".into()
+            ))
+        );
+        // Underscore-spelled GUC, case-insensitive.
+        assert_eq!(
+            intercept("show standard_conforming_strings"),
+            Some(Intercepted::Rewritten(
+                "SELECT 'on' AS \"standard_conforming_strings\"".into()
+            ))
+        );
+        // Unknown variable is answered, not rejected.
+        assert_eq!(
+            intercept("SHOW some_unknown_guc"),
+            Some(Intercepted::Rewritten("SELECT '' AS \"value\"".into()))
         );
     }
 
