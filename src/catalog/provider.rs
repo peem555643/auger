@@ -1,11 +1,16 @@
 //! DataFusion catalog wiring: one SQL catalog holding one schema per MongoDB
 //! database, each listing its collections as tables.
 //!
-//! Schemas are inferred lazily on first reference and then served from the
-//! persistent [`CatalogStore`], so the cost of sampling is paid once and a
-//! table's shape does not change between two queries in the same session.
+//! Collection *names* are listed once at startup so `table_names` — which
+//! DataFusion calls synchronously, and through which `information_schema` and
+//! every reflecting client sees the catalog — reflects the whole database
+//! immediately. Each collection's *schema* is still inferred lazily on first
+//! reference and then served from the persistent [`CatalogStore`], so the cost
+//! of sampling is paid once and a table's shape does not change between two
+//! queries in the same session.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use datafusion::catalog::{CatalogProvider, SchemaProvider, TableProvider};
 use datafusion::error::{DataFusionError, Result};
@@ -14,6 +19,13 @@ use crate::catalog::store::CatalogStore;
 use crate::config::Config;
 use crate::mongo::client::MongoConnection;
 use crate::mongo::provider::MongoTableProvider;
+
+/// Collection listings shared between the catalog and the short-lived
+/// [`MongoSchema`] values it hands out, keyed by database. `schema()` builds a
+/// fresh `MongoSchema` on every call, so a listing cached inside one would be
+/// thrown away immediately; keeping it here lets `table_names` answer without
+/// awaiting and lets a refresh outlive the schema that triggered it.
+type Listings = Arc<RwLock<HashMap<String, Vec<String>>>>;
 
 /// One SQL catalog over an entire MongoDB deployment.
 ///
@@ -24,8 +36,10 @@ use crate::mongo::provider::MongoTableProvider;
 #[derive(Debug)]
 pub struct MongoCatalog {
     databases: Vec<String>,
+    /// Collection names per database, seeded at startup and refreshed on a miss.
+    collections: Listings,
     /// Non-Mongo schemas registered on top, keyed by name.
-    extra: std::sync::RwLock<std::collections::HashMap<String, Arc<dyn SchemaProvider>>>,
+    extra: RwLock<HashMap<String, Arc<dyn SchemaProvider>>>,
     conn: MongoConnection,
     store: Arc<CatalogStore>,
     config: Arc<Config>,
@@ -39,7 +53,32 @@ impl MongoCatalog {
     ) -> anyhow::Result<Self> {
         let databases = conn.databases().await?;
         tracing::info!(count = databases.len(), "discovered databases");
-        Ok(Self { databases, extra: Default::default(), conn, store, config })
+
+        // List collections up front. table_names() is synchronous and cannot
+        // await, so without this it would fall back to the persistent store —
+        // which holds only collections already inferred, i.e. nothing on a
+        // fresh start. information_schema.tables, pg_class, and therefore
+        // SQLAlchemy's get_table_names would all report an empty database.
+        let mut listings = HashMap::new();
+        for db in &databases {
+            match conn.collections(db).await {
+                Ok(names) => {
+                    listings.insert(db.clone(), names);
+                }
+                Err(e) => {
+                    tracing::warn!(db = %db, error = %e, "could not list collections at startup")
+                }
+            }
+        }
+
+        Ok(Self {
+            databases,
+            collections: Arc::new(RwLock::new(listings)),
+            extra: Default::default(),
+            conn,
+            store,
+            config,
+        })
     }
 
     pub fn databases(&self) -> &[String] {
@@ -68,7 +107,7 @@ impl CatalogProvider for MongoCatalog {
                 conn: self.conn.clone(),
                 store: Arc::clone(&self.store),
                 config: Arc::clone(&self.config),
-                collections: std::sync::RwLock::new(None),
+                collections: Arc::clone(&self.collections),
             }) as Arc<dyn SchemaProvider>
         })
     }
@@ -93,29 +132,31 @@ pub struct MongoSchema {
     conn: MongoConnection,
     store: Arc<CatalogStore>,
     config: Arc<Config>,
-    /// Collection listing, cached after the first successful lookup.
-    collections: std::sync::RwLock<Option<Vec<String>>>,
+    /// Shared with the owning [`MongoCatalog`]; see [`Listings`].
+    collections: Listings,
 }
 
 impl MongoSchema {
-    /// Cached collection listing.
+    /// Cached collection listing for this database.
     ///
     /// `SchemaProvider::table_names` is synchronous, so the listing has to be
-    /// available without awaiting. It is refreshed by [`Self::refresh`], which
-    /// every async entry point calls before it needs the list.
+    /// available without awaiting. It is seeded at startup and refreshed by
+    /// [`Self::refresh`]; the store is only a fallback for the window before
+    /// the first successful listing.
     fn cached_names(&self) -> Vec<String> {
-        self.collections
-            .read()
-            .ok()
-            .and_then(|g| g.clone())
-            .unwrap_or_else(|| self.store.known_tables(&self.database))
+        if let Ok(map) = self.collections.read() {
+            if let Some(names) = map.get(&self.database) {
+                return names.clone();
+            }
+        }
+        self.store.known_tables(&self.database)
     }
 
     async fn refresh(&self) -> Vec<String> {
         match self.conn.collections(&self.database).await {
             Ok(names) => {
-                if let Ok(mut guard) = self.collections.write() {
-                    *guard = Some(names.clone());
+                if let Ok(mut map) = self.collections.write() {
+                    map.insert(self.database.clone(), names.clone());
                 }
                 names
             }
