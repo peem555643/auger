@@ -328,8 +328,14 @@ fn build_field(
     max_depth: usize,
 ) -> Field {
     let (data_type, tag) = arrow_type(&fs.shape, path, depth, max_depth);
-    // Absent in some documents, or explicitly null in some: nullable either way.
-    let nullable = fs.nulls > 0 || fs.present < parent_count || matches!(tag, BsonTag::Unknown);
+    // Sampling can prove a field is sometimes null; it cannot prove it is never
+    // null. A field present in every sampled document may still be absent from
+    // one that was not sampled, and declaring it non-nullable then aborts the
+    // scan with "declared as non-nullable but contains null values" the moment
+    // such a document is read. Only `_id`, which MongoDB writes on every
+    // document, is safe to mark non-nullable — and only at the root, since a
+    // nested `_id` carries no such guarantee.
+    let nullable = path != "_id";
     let freq = if parent_count == 0 {
         0.0
     } else {
@@ -452,9 +458,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_field_is_nullable() {
-        let schema = infer(&[doc! {"a": 1i32, "b": 2i32}, doc! {"a": 3i32}]);
-        assert!(!schema.field_with_name("a").unwrap().is_nullable());
+    fn only_root_id_is_non_nullable() {
+        // A field seen in every sampled document is still nullable: the sample
+        // cannot prove an unsampled document does not omit it. `_id` is the one
+        // field MongoDB guarantees, so it alone is non-nullable.
+        let schema = infer(&[doc! {"_id": 1i32, "a": 1i32, "b": 2i32}, doc! {"_id": 2i32, "a": 3i32}]);
+        assert!(!schema.field_with_name("_id").unwrap().is_nullable());
+        assert!(schema.field_with_name("a").unwrap().is_nullable());
         assert!(schema.field_with_name("b").unwrap().is_nullable());
     }
 
