@@ -101,6 +101,12 @@ fn encode_value(encoder: &mut DataRowEncoder, array: &ArrayRef, row: usize) -> P
             let a = array.as_any().downcast_ref::<StringArray>().unwrap();
             encoder.encode_field(&a.value(row))
         }
+        // DataFusion 54 returns SUBSTR, CAST-to-text and several other string
+        // functions as Utf8View, not Utf8. Without this arm the value fell to
+        // the JSON fallback and came out as the debug form of the whole array
+        // ("StringViewArray[...]") instead of the string itself.
+        DataType::Utf8View => encoder.encode_field(&array.as_string_view().value(row)),
+        DataType::LargeUtf8 => encoder.encode_field(&array.as_string::<i64>().value(row)),
         DataType::Binary => {
             let a = array.as_any().downcast_ref::<BinaryArray>().unwrap();
             encoder.encode_field(&a.value(row))
@@ -165,6 +171,11 @@ pub fn value_to_json(array: &ArrayRef, row: usize) -> String {
             let a = array.as_any().downcast_ref::<StringArray>().unwrap();
             quote_json(a.value(row))
         }
+        // See encode_value: Utf8View is what DataFusion 54 produces for most
+        // string expressions, so a JSON-typed column holding one must render it
+        // as the string, not as the array's debug form.
+        DataType::Utf8View => quote_json(array.as_string_view().value(row)),
+        DataType::LargeUtf8 => quote_json(array.as_string::<i64>().value(row)),
         DataType::Timestamp(TimeUnit::Millisecond, _) => {
             let millis = array.as_primitive::<TimestampMillisecondType>().value(row);
             match chrono::DateTime::from_timestamp_millis(millis) {
@@ -290,6 +301,16 @@ mod tests {
         let array = Arc::new(list) as ArrayRef;
         assert_eq!(value_to_json(&array, 0), "[1,2]");
         assert_eq!(value_to_json(&array, 1), "[3]");
+    }
+
+    #[test]
+    fn string_view_renders_as_the_string_not_the_array() {
+        use datafusion::arrow::array::StringViewArray;
+        // What SUBSTR / CAST-to-text return in DataFusion 54. The regression was
+        // this coming out as "StringViewArray[...]".
+        let a = Arc::new(StringViewArray::from(vec![Some("2024-10")])) as ArrayRef;
+        assert_eq!(value_to_json(&a, 0), "\"2024-10\"");
+        assert_eq!(pg_type_of(&DataType::Utf8View), Type::TEXT);
     }
 
     #[test]
