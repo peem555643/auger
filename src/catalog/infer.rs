@@ -183,6 +183,14 @@ pub fn unify(a: Shape, b: Shape, mixed: &mut bool) -> Shape {
         // The two BSON time types both land on a millisecond timestamp.
         (DateTime, BsonTimestamp) | (BsonTimestamp, DateTime) => DateTime,
 
+        // Two arrays merge element-wise. This case MUST come before the
+        // scalar-absorption arm below: that arm binds one array as the "other"
+        // (scalar) operand and wraps it, so `unify(Array(a), Array(b))` would
+        // become `Array(Array(unify(a, b)))` — a spurious extra level on every
+        // merge. A field seen as an array in N sampled documents would then nest
+        // N deep and, past ~128, make the persisted schema unreadable.
+        (Array(a), Array(b)) => Array(Box::new(unify(*a, *b, mixed))),
+
         // A bare scalar where an array is expected is how Mongo itself models
         // single-element arrays, so absorb the scalar into the element type
         // rather than giving up on the column.
@@ -395,13 +403,16 @@ fn arrow_type(shape: &Shape, path: &str, depth: usize, max_depth: usize) -> (Dat
         // structure. The column is still queryable with JSON functions.
         Shape::Document(_) => (DataType::Utf8, BsonTag::Json),
 
-        Shape::Array(inner) => {
+        Shape::Array(inner) if depth < max_depth => {
             let (item_type, item_tag) = arrow_type(inner, path, depth + 1, max_depth);
             let mut item_meta = std::collections::HashMap::with_capacity(1);
             item_meta.insert(META_BSON.to_string(), item_tag.as_str().to_string());
             let item = Field::new("item", item_type, true).with_metadata(item_meta);
             (DataType::List(std::sync::Arc::new(item)), BsonTag::Array)
         }
+        // Too deeply nested to model as a typed list — same treatment as an
+        // over-deep document: keep the values, drop the structure.
+        Shape::Array(_) => (DataType::Utf8, BsonTag::Json),
     }
 }
 
@@ -492,6 +503,36 @@ mod tests {
             panic!("a.b should be a struct")
         };
         assert_eq!(l2.find("c").unwrap().1.data_type(), &DataType::Utf8);
+    }
+
+    #[test]
+    fn unifying_two_arrays_stays_one_level_deep() {
+        // Regression: `unify(Array, Array)` used to fall through to the
+        // scalar-absorption arm, wrapping one operand and adding a level of
+        // nesting on every merge.
+        let mut mixed = false;
+        let joined = unify(
+            Shape::Array(Box::new(Shape::Int32)),
+            Shape::Array(Box::new(Shape::Int64)),
+            &mut mixed,
+        );
+        assert_eq!(joined, Shape::Array(Box::new(Shape::Int64)));
+    }
+
+    #[test]
+    fn repeated_array_observations_do_not_deepen_the_schema() {
+        // The bug that made the persisted catalog unreadable: an array field
+        // seen across many documents nested itself once per merge, so after
+        // ~128 documents serde_json could no longer parse the cached schema.
+        let mut s = Sampler::new();
+        for _ in 0..200 {
+            s.observe(&doc! {"tags": ["a", "b"]});
+        }
+        let schema = s.finish(4);
+        match schema.field_with_name("tags").unwrap().data_type() {
+            DataType::List(item) => assert_eq!(item.data_type(), &DataType::Utf8),
+            other => panic!("expected a single-level List(Utf8), got {other:?}"),
+        }
     }
 
     #[test]

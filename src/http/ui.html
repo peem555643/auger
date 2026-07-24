@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auger — status &amp; catalog</title>
+<style>
+  :root {
+    color-scheme: dark light;
+    --bg: #0f1115; --panel: #161a21; --line: #262c37;
+    --fg: #dfe4ec; --dim: #8b95a7; --accent: #4cc2e0;
+    --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f6f7f9; --panel:#fff; --line:#e2e6ec; --fg:#1a1f28; --dim:#5d6779; --accent:#0a7ea4; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  h1 { font-size: 16px; margin: 0; letter-spacing: .5px; }
+  h1 span { color: var(--dim); font-weight: 400; }
+  .badge {
+    font: 600 11px/1 var(--mono); padding: 5px 9px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--dim); white-space: nowrap;
+  }
+  .badge.ok   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+  .badge.bad  { color: var(--bad);  border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+  .badge.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+  .spacer { flex: 1; }
+  button {
+    font: inherit; color: var(--fg); background: transparent;
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 11px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+           gap: 12px; padding: 16px 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .card h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+  .kv { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+  .kv span:first-child { color: var(--dim); }
+  .kv span:last-child { font-family: var(--mono); font-size: 12px; text-align: right;
+                        overflow-wrap: anywhere; }
+
+  main { display: grid; grid-template-columns: minmax(220px, 300px) 1fr; gap: 16px;
+         padding: 0 20px 24px; align-items: start; }
+  @media (max-width: 820px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .panel > header { background: transparent; border-bottom: 1px solid var(--line); padding: 10px 14px; }
+
+  #filter { width: 100%; font: inherit; color: var(--fg); background: var(--bg);
+            border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; }
+  .dbname { padding: 10px 14px 4px; font: 600 11px/1 var(--mono); color: var(--dim);
+            letter-spacing: .08em; text-transform: uppercase; }
+  .tbl { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+         padding: 7px 14px; cursor: pointer; border-left: 2px solid transparent; }
+  .tbl:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .tbl.active { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .tbl code { font-family: var(--mono); font-size: 12.5px; }
+  .tbl small { color: var(--dim); font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font: 600 11px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--dim); }
+  td { font-family: var(--mono); font-size: 12.5px; }
+  tr:last-child td { border-bottom: 0; }
+  .type { color: var(--accent); }
+  .bson { color: var(--dim); }
+  .null { color: var(--dim); }
+  .mixedrow { background: color-mix(in srgb, var(--warn) 9%, transparent); }
+  .scroll { overflow-x: auto; }
+  .msg { padding: 24px; color: var(--dim); }
+  .err { padding: 16px; color: var(--bad); font-family: var(--mono); font-size: 12.5px;
+         overflow-wrap: anywhere; }
+  .note { padding: 10px 14px; color: var(--dim); font-size: 12px; border-top: 1px solid var(--line); }
+  .dim { color: var(--dim); font-weight: 400; }
+
+  .console { padding: 0 20px 16px; }
+  .console .panel > header { display: flex; align-items: center; gap: 10px; }
+  #sql { width: 100%; min-height: 84px; resize: vertical; border: 0; border-bottom: 1px solid var(--line);
+         background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 13px;
+         padding: 12px 14px; outline: none; }
+  .consbar { display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
+  #qresult table { font-size: 12px; }
+  #qresult td { white-space: pre; }
+  #qresult th { position: sticky; top: 0; background: var(--panel); }
+  #qwrap { max-height: 380px; overflow: auto; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Auger <span id="version"></span></h1>
+  <span class="badge" id="mongoBadge">connecting…</span>
+  <span class="badge" id="uptimeBadge"></span>
+  <div class="spacer"></div>
+  <button id="reload">Reload catalog</button>
+</header>
+
+<section class="cards">
+  <div class="card">
+    <h2>MongoDB</h2>
+    <div id="mongoCard"></div>
+  </div>
+  <div class="card">
+    <h2>SQL listener</h2>
+    <div id="sqlCard"></div>
+  </div>
+  <div class="card">
+    <h2>Schema inference</h2>
+    <div id="catalogCard"></div>
+  </div>
+</section>
+
+<section class="console" id="console" hidden>
+  <div class="panel">
+    <header>SQL console <span class="dim">read-only · ⌘/Ctrl+Enter to run</span></header>
+    <textarea id="sql" spellcheck="false" placeholder="SELECT * FROM mailbox.user LIMIT 100"></textarea>
+    <div class="consbar">
+      <button id="run">Run</button>
+      <span id="qstatus" class="dim"></span>
+    </div>
+    <div id="qresult"></div>
+  </div>
+</section>
+
+<main>
+  <div class="panel">
+    <header><input id="filter" placeholder="filter tables…" autocomplete="off"></header>
+    <div id="tables"><div class="msg">loading…</div></div>
+  </div>
+  <div class="panel">
+    <div id="detail"><div class="msg">Select a table to see the schema Auger inferred for it.</div></div>
+  </div>
+</main>
+
+<script>
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+const kv = (k, v) => `<div class="kv"><span>${esc(k)}</span><span>${esc(v)}</span></div>`;
+const num = n => (n === null || n === undefined) ? "—" : Number(n).toLocaleString();
+
+function bytes(n) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0, v = Number(n);
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+
+function ago(unixSecs) {
+  if (!unixSecs) return "—";
+  const d = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs);
+  if (d < 60) return `${d}s ago`;
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
+}
+
+let catalogData = null, selected = null;
+
+async function loadHealth() {
+  const badge = document.getElementById("mongoBadge");
+  try {
+    const h = await (await fetch("api/health")).json();
+    document.getElementById("version").textContent = "v" + h.version;
+    badge.textContent = h.mongo.reachable ? "mongo reachable" : "mongo unreachable";
+    badge.className = "badge " + (h.mongo.reachable ? "ok" : "bad");
+    document.getElementById("uptimeBadge").textContent = "up " + ago(Math.floor(Date.now()/1000) - h.uptime_secs).replace(" ago", "");
+
+    document.getElementById("mongoCard").innerHTML =
+      kv("uri", h.mongo.uri) +
+      kv("reachable", h.mongo.reachable ? "yes" : "no") +
+      (h.mongo.error ? kv("error", h.mongo.error) : "");
+    document.getElementById("sqlCard").innerHTML =
+      kv("listen", h.sql.listen) + kv("auth", h.sql.auth) +
+      kv("query console", h.sql.query_enabled ? "on" : "off") +
+      kv("cached tables", num(h.catalog.cached_tables));
+    document.getElementById("console").hidden = !h.sql.query_enabled;
+    document.getElementById("catalogCard").innerHTML =
+      kv("sample size", num(h.catalog.sample_size)) +
+      kv("recent bias", h.catalog.recent_bias) +
+      kv("max depth", h.catalog.max_depth) +
+      kv("rare threshold", h.catalog.rare_field_threshold) +
+      kv("re-infer after", h.catalog.refresh_interval_secs ? h.catalog.refresh_interval_secs + "s" : "never");
+  } catch (e) {
+    badge.textContent = "gateway unreachable";
+    badge.className = "badge bad";
+  }
+}
+
+async function loadCatalog() {
+  const host = document.getElementById("tables");
+  host.innerHTML = '<div class="msg">loading…</div>';
+  try {
+    const j = await (await fetch("api/catalog")).json();
+    if (j.error) throw new Error(j.error);
+    catalogData = j.databases;
+    renderTables();
+  } catch (e) {
+    host.innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+function renderTables() {
+  const q = document.getElementById("filter").value.trim().toLowerCase();
+  const host = document.getElementById("tables");
+  let html = "";
+  for (const db of catalogData) {
+    const tables = db.tables.filter(t => !q || t.name.toLowerCase().includes(q));
+    if (!tables.length) continue;
+    html += `<div class="dbname">${esc(db.name)}</div>`;
+    for (const t of tables) {
+      const active = selected && selected.db === db.name && selected.table === t.name;
+      const meta = t.inferred ? `${num(t.columns)} cols · ${num(t.doc_count)} rows` : "not sampled";
+      html += `<div class="tbl${active ? " active" : ""}" data-db="${esc(db.name)}" data-table="${esc(t.name)}">
+                 <code>${esc(t.name)}</code><small>${esc(meta)}</small></div>`;
+    }
+  }
+  host.innerHTML = html || '<div class="msg">no tables match</div>';
+  host.querySelectorAll(".tbl").forEach(el =>
+    el.onclick = () => selectTable(el.dataset.db, el.dataset.table, false));
+}
+
+async function selectTable(db, table, refresh) {
+  selected = { db, table };
+  renderTables();
+  const sqlBox = document.getElementById("sql");
+  if (!document.getElementById("console").hidden && !sqlBox.value.trim()) {
+    sqlBox.value = `SELECT * FROM ${db}."${table}" LIMIT 100`;
+  }
+  const host = document.getElementById("detail");
+  host.innerHTML = `<div class="msg">${refresh ? "re-sampling" : "loading"} ${esc(db)}.${esc(table)}…</div>`;
+  try {
+    const url = `api/table/${encodeURIComponent(db)}/${encodeURIComponent(table)}${refresh ? "?refresh=true" : ""}`;
+    const j = await (await fetch(url)).json();
+    if (j.error) throw new Error(j.error);
+    renderDetail(j);
+    if (refresh) loadCatalog();
+  } catch (e) {
+    host.innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+function flatten(cols, depth = 0, out = []) {
+  for (const c of cols) {
+    out.push({ ...c, depth });
+    if (c.children && c.children.length) flatten(c.children, depth + 1, out);
+  }
+  return out;
+}
+
+function renderDetail(j) {
+  const rows = flatten(j.columns).map(c => {
+    const pad = c.depth ? `style="padding-left:${14 + c.depth * 18}px"` : "";
+    const mixed = c.mixed ? ' <span class="badge warn">mixed</span>' : "";
+    return `<tr class="${c.mixed ? "mixedrow" : ""}">
+      <td ${pad}>${esc(c.name)}${mixed}</td>
+      <td class="type">${esc(c.type)}</td>
+      <td class="bson">${esc(c.bson)}</td>
+      <td class="null">${c.nullable ? "null" : "not null"}</td>
+    </tr>`;
+  }).join("");
+
+  const anyMixed = flatten(j.columns).some(c => c.mixed);
+  document.getElementById("detail").innerHTML = `
+    <header style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <strong><code>${esc(j.db)}.${esc(j.table)}</code></strong>
+      <span class="badge">${num(j.stats.doc_count)} rows</span>
+      <span class="badge">${esc(bytes(j.stats.total_size))}</span>
+      <span class="badge">sampled ${esc(ago(j.inferred_at))}</span>
+      <div class="spacer"></div>
+      <button id="resample">Re-sample</button>
+    </header>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>column</th><th>sql / arrow type</th><th>bson</th><th>null</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    ${anyMixed ? '<div class="note">Rows highlighted <b>mixed</b> hold more than one BSON type across the sample; Auger widened them to a type that can represent all of it (usually text). Filters on those columns are not pushed down as exact matches.</div>' : ""}
+    ${j.stats.indexed_paths.length ? `<div class="note">Indexed paths: ${j.stats.indexed_paths.map(esc).join(", ")}</div>` : '<div class="note">No indexes reported for this collection.</div>'}
+  `;
+  document.getElementById("resample").onclick = () => selectTable(j.db, j.table, true);
+}
+
+async function runQuery() {
+  const sql = document.getElementById("sql").value.trim();
+  const status = document.getElementById("qstatus");
+  const out = document.getElementById("qresult");
+  if (!sql) return;
+  status.textContent = "running…";
+  out.innerHTML = "";
+  try {
+    const res = await fetch("api/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sql, limit: 1000 }),
+    });
+    const j = await res.json();
+    if (j.error) throw new Error(j.error);
+    status.textContent = `${num(j.row_count)} row${j.row_count === 1 ? "" : "s"}`
+      + (j.truncated ? " (truncated)" : "") + ` · ${j.elapsed_ms} ms`;
+    if (!j.columns.length) { out.innerHTML = '<div class="msg">no columns</div>'; return; }
+    const head = j.columns.map((c, i) =>
+      `<th>${esc(c)}<br><span class="dim" style="font-weight:400">${esc(j.types[i])}</span></th>`).join("");
+    const body = j.rows.map(r => `<tr>${r.map(v => `<td>${esc(v)}</td>`).join("")}</tr>`).join("")
+      || `<tr><td colspan="${j.columns.length}" class="dim">0 rows</td></tr>`;
+    out.innerHTML = `<div id="qwrap" class="scroll"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  } catch (e) {
+    status.textContent = "";
+    out.innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+document.getElementById("run").onclick = runQuery;
+document.getElementById("sql").addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); runQuery(); }
+});
+document.getElementById("filter").oninput = () => catalogData && renderTables();
+document.getElementById("reload").onclick = () => { loadHealth(); loadCatalog(); };
+
+loadHealth();
+loadCatalog();
+setInterval(loadHealth, 15000);
+</script>
+</body>
+</html>

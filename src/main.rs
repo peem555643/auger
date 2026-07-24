@@ -6,6 +6,7 @@
 
 mod catalog;
 mod config;
+mod http;
 mod mongo;
 mod server;
 
@@ -38,6 +39,18 @@ struct Cli {
     /// Address to listen on for PostgreSQL clients.
     #[arg(long, env = "AUGER_LISTEN")]
     listen: Option<String>,
+
+    /// Address to serve the read-only status/catalog UI on. Off unless set.
+    #[arg(long, env = "AUGER_HTTP_LISTEN")]
+    http_listen: Option<String>,
+
+    /// Let the HTTP UI run read-only SQL (`true`/`false`). Off unless set.
+    ///
+    /// A String, not a bool: clap treats a `bool` field as a presence flag and
+    /// never reads its environment variable as a value, so `AUGER_HTTP_QUERY`
+    /// would be silently ignored. Parsed by `is_truthy` below.
+    #[arg(long, env = "AUGER_HTTP_QUERY")]
+    http_query: Option<String>,
 
     /// Documents to sample per collection when inferring a schema.
     #[arg(long)]
@@ -77,8 +90,29 @@ async fn main() -> anyhow::Result<()> {
         return describe(&conn, &mongo_catalog, &config).await;
     }
 
-    let ctx = build_session(mongo_catalog, &config).await?;
-    server::serve(Arc::new(ctx), config).await
+    let ctx = Arc::new(build_session(Arc::clone(&mongo_catalog), &config).await?);
+
+    // The UI is a side channel, not part of serving SQL: if it cannot bind, say
+    // so and carry on rather than taking the gateway down with it. It shares the
+    // same SessionContext as the wire server, so its query console runs against
+    // exactly what a psql client would see.
+    if let Some(addr) = config.server.http_listen.clone() {
+        let state = http::AppState {
+            conn: conn.clone(),
+            catalog: Arc::clone(&mongo_catalog),
+            store: Arc::clone(&store),
+            config: Arc::clone(&config),
+            ctx: Arc::clone(&ctx),
+            started: std::time::Instant::now(),
+        };
+        tokio::spawn(async move {
+            if let Err(e) = http::serve(addr, state).await {
+                tracing::error!(error = %e, "http UI stopped");
+            }
+        });
+    }
+
+    server::serve(ctx, config).await
 }
 
 /// Merge the configuration file with command-line overrides.
@@ -90,6 +124,12 @@ fn build_config(cli: &Cli) -> anyhow::Result<Config> {
     if let Some(listen) = &cli.listen {
         config.server.listen = listen.clone();
     }
+    if let Some(addr) = &cli.http_listen {
+        config.server.http_listen = Some(addr.clone());
+    }
+    if let Some(q) = &cli.http_query {
+        config.server.http_query = is_truthy(q);
+    }
     if let Some(n) = cli.sample_size {
         config.catalog.sample_size = n;
     }
@@ -97,6 +137,12 @@ fn build_config(cli: &Cli) -> anyhow::Result<Config> {
         config.catalog.cache_path = Some(path.clone());
     }
     Ok(config)
+}
+
+/// Truthy values accepted for the string-valued boolean flags, so
+/// `AUGER_HTTP_QUERY=true` and `=1` both work. Anything else is false.
+fn is_truthy(s: &str) -> bool {
+    matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 
 async fn build_session(
