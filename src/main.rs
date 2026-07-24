@@ -45,8 +45,12 @@ struct Cli {
     http_listen: Option<String>,
 
     /// Let the HTTP UI run read-only SQL (`true`/`false`). Off unless set.
+    ///
+    /// A String, not a bool: clap treats a `bool` field as a presence flag and
+    /// never reads its environment variable as a value, so `AUGER_HTTP_QUERY`
+    /// would be silently ignored. Parsed by `is_truthy` below.
     #[arg(long, env = "AUGER_HTTP_QUERY")]
-    http_query: Option<bool>,
+    http_query: Option<String>,
 
     /// Documents to sample per collection when inferring a schema.
     #[arg(long)]
@@ -123,8 +127,8 @@ fn build_config(cli: &Cli) -> anyhow::Result<Config> {
     if let Some(addr) = &cli.http_listen {
         config.server.http_listen = Some(addr.clone());
     }
-    if let Some(q) = cli.http_query {
-        config.server.http_query = q;
+    if let Some(q) = &cli.http_query {
+        config.server.http_query = is_truthy(q);
     }
     if let Some(n) = cli.sample_size {
         config.catalog.sample_size = n;
@@ -133,6 +137,12 @@ fn build_config(cli: &Cli) -> anyhow::Result<Config> {
         config.catalog.cache_path = Some(path.clone());
     }
     Ok(config)
+}
+
+/// Truthy values accepted for the string-valued boolean flags, so
+/// `AUGER_HTTP_QUERY=true` and `=1` both work. Anything else is false.
+fn is_truthy(s: &str) -> bool {
+    matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 
 async fn build_session(
