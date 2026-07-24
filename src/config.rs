@@ -21,6 +21,11 @@ pub struct Config {
 pub struct ServerConfig {
     /// Address the PostgreSQL wire listener binds to.
     pub listen: String,
+    /// Address the read-only HTTP status/catalog UI binds to. `None` — the
+    /// default — starts no HTTP listener at all: the UI exposes collection and
+    /// field names, so it is opt-in rather than something a deployment grows
+    /// without deciding to.
+    pub http_listen: Option<String>,
     /// `trust` accepts any user; `md5` and `scram` check `users`.
     pub auth: AuthMode,
     /// user -> cleartext password, consulted by the `md5`/`scram` auth modes.
@@ -35,6 +40,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:5433".into(),
+            http_listen: None,
             auth: AuthMode::Trust,
             users: Default::default(),
             batch_size: 8192,

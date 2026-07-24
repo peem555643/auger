@@ -6,6 +6,7 @@
 
 mod catalog;
 mod config;
+mod http;
 mod mongo;
 mod server;
 
@@ -38,6 +39,10 @@ struct Cli {
     /// Address to listen on for PostgreSQL clients.
     #[arg(long, env = "AUGER_LISTEN")]
     listen: Option<String>,
+
+    /// Address to serve the read-only status/catalog UI on. Off unless set.
+    #[arg(long, env = "AUGER_HTTP_LISTEN")]
+    http_listen: Option<String>,
 
     /// Documents to sample per collection when inferring a schema.
     #[arg(long)]
@@ -77,7 +82,25 @@ async fn main() -> anyhow::Result<()> {
         return describe(&conn, &mongo_catalog, &config).await;
     }
 
-    let ctx = build_session(mongo_catalog, &config).await?;
+    let ctx = build_session(Arc::clone(&mongo_catalog), &config).await?;
+
+    // The UI is a side channel, not part of serving SQL: if it cannot bind, say
+    // so and carry on rather than taking the gateway down with it.
+    if let Some(addr) = config.server.http_listen.clone() {
+        let state = http::AppState {
+            conn: conn.clone(),
+            catalog: Arc::clone(&mongo_catalog),
+            store: Arc::clone(&store),
+            config: Arc::clone(&config),
+            started: std::time::Instant::now(),
+        };
+        tokio::spawn(async move {
+            if let Err(e) = http::serve(addr, state).await {
+                tracing::error!(error = %e, "http UI stopped");
+            }
+        });
+    }
+
     server::serve(Arc::new(ctx), config).await
 }
 
@@ -89,6 +112,9 @@ fn build_config(cli: &Cli) -> anyhow::Result<Config> {
     }
     if let Some(listen) = &cli.listen {
         config.server.listen = listen.clone();
+    }
+    if let Some(addr) = &cli.http_listen {
+        config.server.http_listen = Some(addr.clone());
     }
     if let Some(n) = cli.sample_size {
         config.catalog.sample_size = n;

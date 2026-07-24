@@ -32,6 +32,18 @@ statement_timeout_secs = 300
 # the credentials it protects.
 # listen = "127.0.0.1:5433"
 
+# Read-only status/catalog UI. Unset means no HTTP listener at all, which is the
+# default: the page lists every collection and field name, so it is opt-in.
+#
+# It has NO authentication of its own — there is no password to set here. Bind
+# it to loopback and reach it over an SSH tunnel:
+#
+#     ssh -L 8080:127.0.0.1:8080 <this-host>    # then http://localhost:8080
+#
+# Binding it to 0.0.0.0 publishes your schema to anything that can route here;
+# if you do, restrict the port the same way 5433 is restricted.
+# http_listen = "127.0.0.1:8080"
+
 # Cleartext, which is why this file is 0640. One account per consumer, so
 # rotating one does not take every dashboard down at once.
 [server.users]
