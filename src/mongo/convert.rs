@@ -321,6 +321,18 @@ fn render_text(value: &Bson, tag: BsonTag) -> Option<String> {
         (Bson::DateTime(dt), _) => dt
             .try_to_rfc3339_string()
             .unwrap_or_else(|_| dt.timestamp_millis().to_string()),
+        // UUID binary subtypes read back as the canonical 8-4-4-4-12 string —
+        // matched regardless of the column tag, so even a mixed column that
+        // degraded to JSON still shows a readable UUID rather than raw bytes.
+        (Bson::Binary(b), _)
+            if b.bytes.len() == 16
+                && matches!(
+                    b.subtype,
+                    bson::spec::BinarySubtype::Uuid | bson::spec::BinarySubtype::UuidOld
+                ) =>
+        {
+            uuid_hyphenated(&b.bytes)
+        }
         (Bson::Binary(b), _) => {
             use base64_min::encode;
             encode(&b.bytes)
@@ -329,6 +341,21 @@ fn render_text(value: &Bson, tag: BsonTag) -> Option<String> {
         // as extended JSON, which is also what the JSON SQL functions expect.
         (other, _) => other.clone().into_relaxed_extjson().to_string(),
     })
+}
+
+/// Format 16 raw bytes as a canonical hyphenated UUID (8-4-4-4-12 lowercase
+/// hex). The caller guarantees the length.
+fn uuid_hyphenated(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(36);
+    for (i, &byte) in bytes.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            s.push('-');
+        }
+        s.push(HEX[(byte >> 4) as usize] as char);
+        s.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    s
 }
 
 /// Minimal base64 encoder — pulling a dependency for eleven lines of table
@@ -443,6 +470,33 @@ mod tests {
         assert_eq!(l.value_length(0), 2);
         assert_eq!(l.value_length(1), 1, "a lone scalar is a one-element list");
         assert!(l.is_null(2));
+    }
+
+    #[test]
+    fn uuid_binary_renders_as_a_hyphenated_string() {
+        let bin = bson::Binary {
+            subtype: bson::spec::BinarySubtype::Uuid,
+            bytes: (0u8..16).collect(),
+        };
+        let b = batch_of(vec![doc! {"ref": bin}]);
+        assert_eq!(
+            b.column_by_name("ref").unwrap().as_string::<i32>().value(0),
+            "00010203-0405-0607-0809-0a0b0c0d0e0f"
+        );
+    }
+
+    #[test]
+    fn array_of_uuid_binary_renders_each_element_as_a_string() {
+        let mk = |n: u8| Bson::Binary(bson::Binary {
+            subtype: bson::spec::BinarySubtype::Uuid,
+            bytes: vec![n; 16],
+        });
+        let b = batch_of(vec![doc! {"ids": vec![mk(0), mk(0xff)]}]);
+        let list = b.column_by_name("ids").unwrap().as_list::<i32>();
+        let inner = list.value(0);
+        let strs = inner.as_string::<i32>();
+        assert_eq!(strs.value(0), "00000000-0000-0000-0000-000000000000");
+        assert_eq!(strs.value(1), "ffffffff-ffff-ffff-ffff-ffffffffffff");
     }
 
     #[test]

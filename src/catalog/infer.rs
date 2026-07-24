@@ -53,6 +53,8 @@ pub enum BsonTag {
     DateTime,
     Timestamp,
     Binary,
+    /// BSON UUID binary subtype (3/4), surfaced as the canonical UUID string.
+    Uuid,
     Document,
     Array,
     /// Heterogeneous or unrepresentable — stored as extended JSON text.
@@ -74,6 +76,7 @@ impl BsonTag {
             Self::DateTime => "date",
             Self::Timestamp => "timestamp",
             Self::Binary => "binary",
+            Self::Uuid => "uuid",
             Self::Document => "document",
             Self::Array => "array",
             Self::Json => "json",
@@ -93,6 +96,7 @@ impl BsonTag {
             "date" => Self::DateTime,
             "timestamp" => Self::Timestamp,
             "binary" => Self::Binary,
+            "uuid" => Self::Uuid,
             "document" => Self::Document,
             "array" => Self::Array,
             "json" => Self::Json,
@@ -129,6 +133,7 @@ pub enum Shape {
     DateTime,
     BsonTimestamp,
     Binary,
+    Uuid,
     Document(BTreeMap<String, FieldShape>),
     Array(Box<Shape>),
     /// The lattice top: anything that could not be represented more precisely.
@@ -240,7 +245,10 @@ fn shape_of(value: &Bson) -> Shape {
         Bson::ObjectId(_) => Shape::ObjectId,
         Bson::DateTime(_) => Shape::DateTime,
         Bson::Timestamp(_) => Shape::BsonTimestamp,
-        Bson::Binary(_) => Shape::Binary,
+        Bson::Binary(b) => match b.subtype {
+            bson::spec::BinarySubtype::Uuid | bson::spec::BinarySubtype::UuidOld => Shape::Uuid,
+            _ => Shape::Binary,
+        },
         Bson::Null | Bson::Undefined => Shape::Unknown,
         Bson::Document(doc) => {
             let mut fields = BTreeMap::new();
@@ -386,6 +394,9 @@ fn arrow_type(shape: &Shape, path: &str, depth: usize, max_depth: usize) -> (Dat
             BsonTag::Timestamp,
         ),
         Shape::Binary => (DataType::Binary, BsonTag::Binary),
+        // A UUID is 16 opaque bytes on the wire; surfaced as the canonical
+        // hyphenated string it is both readable and typeable in a predicate.
+        Shape::Uuid => (DataType::Utf8, BsonTag::Uuid),
         Shape::Json => (DataType::Utf8, BsonTag::Json),
 
         Shape::Document(children) if depth < max_depth && !children.is_empty() => {
@@ -560,6 +571,18 @@ mod tests {
         let schema = infer(&[doc! {"zeta": 1i32, "_id": 1i32, "alpha": 2i32}]);
         assert_eq!(schema.field(0).name(), "_id");
         assert_eq!(schema.field(1).name(), "alpha");
+    }
+
+    #[test]
+    fn uuid_binary_becomes_a_uuid_tagged_text_column() {
+        let uuid = bson::Binary {
+            subtype: bson::spec::BinarySubtype::Uuid,
+            bytes: vec![0u8; 16],
+        };
+        let schema = infer(&[doc! {"ref": uuid}]);
+        let f = schema.field_with_name("ref").unwrap();
+        assert_eq!(f.data_type(), &DataType::Utf8);
+        assert_eq!(BsonTag::of(f), BsonTag::Uuid);
     }
 
     #[test]

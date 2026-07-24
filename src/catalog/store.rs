@@ -77,7 +77,9 @@ enum StoredType {
     List { item: Box<StoredField> },
 }
 
-const CATALOG_VERSION: u32 = 1;
+// Bumped to 2 when UUID binary subtypes started surfacing as `uuid`-tagged text
+// columns instead of `binary`; a v1 cache would keep serving the old shape.
+const CATALOG_VERSION: u32 = 2;
 
 impl StoredType {
     fn from_arrow(dt: &DataType) -> Option<Self> {

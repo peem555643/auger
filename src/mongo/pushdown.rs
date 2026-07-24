@@ -434,6 +434,12 @@ pub(crate) fn scalar_to_bson(scalar: &ScalarValue, tag: BsonTag) -> Option<Bson>
         (ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)), BsonTag::ObjectId) => {
             Bson::ObjectId(s.parse().ok()?)
         }
+        // A UUID column is BSON Binary, and its subtype (3 vs 4) is not carried
+        // in the tag; pushing a String — or the wrong subtype — would silently
+        // match nothing, so refuse and let DataFusion apply the filter instead.
+        (ScalarValue::Utf8(Some(_)) | ScalarValue::LargeUtf8(Some(_)), BsonTag::Uuid) => {
+            return None;
+        }
         (ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)), _) => {
             Bson::String(s.clone())
         }
@@ -513,6 +519,7 @@ mod tests {
     fn test_schema() -> Schema {
         Schema::new(vec![
             field("_id", DataType::Utf8, "objectId", false),
+            field("uid", DataType::Utf8, "uuid", false),
             field("age", DataType::Int32, "int32", false),
             field("name", DataType::Utf8, "string", false),
             field("active", DataType::Boolean, "bool", false),
@@ -564,6 +571,24 @@ mod tests {
     #[test]
     fn malformed_objectid_literal_is_not_pushed() {
         assert!(translate(&col("_id").eq(lit("not-an-oid")), &test_schema()).is_none());
+    }
+
+    #[test]
+    fn uuid_columns_are_not_pushed_as_strings() {
+        // The column stores BSON Binary; a pushed String literal would match
+        // nothing. The filter must fall back to DataFusion instead.
+        assert!(scalar_to_bson(
+            &ScalarValue::Utf8(Some("00010203-0405-0607-0809-0a0b0c0d0e0f".into())),
+            BsonTag::Uuid,
+        )
+        .is_none());
+        assert!(
+            translate(
+                &col("uid").eq(lit("00010203-0405-0607-0809-0a0b0c0d0e0f")),
+                &test_schema()
+            )
+            .is_none()
+        );
     }
 
     #[test]
