@@ -44,6 +44,10 @@ struct Cli {
     #[arg(long, env = "AUGER_HTTP_LISTEN")]
     http_listen: Option<String>,
 
+    /// Let the HTTP UI run read-only SQL (`true`/`false`). Off unless set.
+    #[arg(long, env = "AUGER_HTTP_QUERY")]
+    http_query: Option<bool>,
+
     /// Documents to sample per collection when inferring a schema.
     #[arg(long)]
     sample_size: Option<i64>,
@@ -118,6 +122,9 @@ fn build_config(cli: &Cli) -> anyhow::Result<Config> {
     }
     if let Some(addr) = &cli.http_listen {
         config.server.http_listen = Some(addr.clone());
+    }
+    if let Some(q) = cli.http_query {
+        config.server.http_query = q;
     }
     if let Some(n) = cli.sample_size {
         config.catalog.sample_size = n;
