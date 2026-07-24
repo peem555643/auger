@@ -26,6 +26,12 @@ pub struct ServerConfig {
     /// field names, so it is opt-in rather than something a deployment grows
     /// without deciding to.
     pub http_listen: Option<String>,
+    /// Let the HTTP UI *execute* read-only SQL (a query console), not just
+    /// browse the catalog. Off even when the UI is up: the UI has no auth of
+    /// its own, so running arbitrary queries against the data is a separate,
+    /// deliberate choice. Only `SELECT`/`WITH`/`EXPLAIN`/`SHOW`/`DESCRIBE` are
+    /// accepted, results are row-capped, and `statement_timeout_secs` applies.
+    pub http_query: bool,
     /// `trust` accepts any user; `md5` and `scram` check `users`.
     pub auth: AuthMode,
     /// user -> cleartext password, consulted by the `md5`/`scram` auth modes.
@@ -41,6 +47,7 @@ impl Default for ServerConfig {
         Self {
             listen: "127.0.0.1:5433".into(),
             http_listen: None,
+            http_query: false,
             auth: AuthMode::Trust,
             users: Default::default(),
             batch_size: 8192,

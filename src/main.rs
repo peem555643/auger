@@ -82,16 +82,19 @@ async fn main() -> anyhow::Result<()> {
         return describe(&conn, &mongo_catalog, &config).await;
     }
 
-    let ctx = build_session(Arc::clone(&mongo_catalog), &config).await?;
+    let ctx = Arc::new(build_session(Arc::clone(&mongo_catalog), &config).await?);
 
     // The UI is a side channel, not part of serving SQL: if it cannot bind, say
-    // so and carry on rather than taking the gateway down with it.
+    // so and carry on rather than taking the gateway down with it. It shares the
+    // same SessionContext as the wire server, so its query console runs against
+    // exactly what a psql client would see.
     if let Some(addr) = config.server.http_listen.clone() {
         let state = http::AppState {
             conn: conn.clone(),
             catalog: Arc::clone(&mongo_catalog),
             store: Arc::clone(&store),
             config: Arc::clone(&config),
+            ctx: Arc::clone(&ctx),
             started: std::time::Instant::now(),
         };
         tokio::spawn(async move {
@@ -101,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    server::serve(Arc::new(ctx), config).await
+    server::serve(ctx, config).await
 }
 
 /// Merge the configuration file with command-line overrides.

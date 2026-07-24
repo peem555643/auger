@@ -80,6 +80,18 @@
   .err { padding: 16px; color: var(--bad); font-family: var(--mono); font-size: 12.5px;
          overflow-wrap: anywhere; }
   .note { padding: 10px 14px; color: var(--dim); font-size: 12px; border-top: 1px solid var(--line); }
+  .dim { color: var(--dim); font-weight: 400; }
+
+  .console { padding: 0 20px 16px; }
+  .console .panel > header { display: flex; align-items: center; gap: 10px; }
+  #sql { width: 100%; min-height: 84px; resize: vertical; border: 0; border-bottom: 1px solid var(--line);
+         background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 13px;
+         padding: 12px 14px; outline: none; }
+  .consbar { display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
+  #qresult table { font-size: 12px; }
+  #qresult td { white-space: pre; }
+  #qresult th { position: sticky; top: 0; background: var(--panel); }
+  #qwrap { max-height: 380px; overflow: auto; }
 </style>
 </head>
 <body>
@@ -104,6 +116,18 @@
   <div class="card">
     <h2>Schema inference</h2>
     <div id="catalogCard"></div>
+  </div>
+</section>
+
+<section class="console" id="console" hidden>
+  <div class="panel">
+    <header>SQL console <span class="dim">read-only · ⌘/Ctrl+Enter to run</span></header>
+    <textarea id="sql" spellcheck="false" placeholder="SELECT * FROM mailbox.user LIMIT 100"></textarea>
+    <div class="consbar">
+      <button id="run">Run</button>
+      <span id="qstatus" class="dim"></span>
+    </div>
+    <div id="qresult"></div>
   </div>
 </section>
 
@@ -155,7 +179,10 @@ async function loadHealth() {
       kv("reachable", h.mongo.reachable ? "yes" : "no") +
       (h.mongo.error ? kv("error", h.mongo.error) : "");
     document.getElementById("sqlCard").innerHTML =
-      kv("listen", h.sql.listen) + kv("auth", h.sql.auth) + kv("cached tables", num(h.catalog.cached_tables));
+      kv("listen", h.sql.listen) + kv("auth", h.sql.auth) +
+      kv("query console", h.sql.query_enabled ? "on" : "off") +
+      kv("cached tables", num(h.catalog.cached_tables));
+    document.getElementById("console").hidden = !h.sql.query_enabled;
     document.getElementById("catalogCard").innerHTML =
       kv("sample size", num(h.catalog.sample_size)) +
       kv("recent bias", h.catalog.recent_bias) +
@@ -204,6 +231,10 @@ function renderTables() {
 async function selectTable(db, table, refresh) {
   selected = { db, table };
   renderTables();
+  const sqlBox = document.getElementById("sql");
+  if (!document.getElementById("console").hidden && !sqlBox.value.trim()) {
+    sqlBox.value = `SELECT * FROM ${db}."${table}" LIMIT 100`;
+  }
   const host = document.getElementById("detail");
   host.innerHTML = `<div class="msg">${refresh ? "re-sampling" : "loading"} ${esc(db)}.${esc(table)}…</div>`;
   try {
@@ -259,6 +290,39 @@ function renderDetail(j) {
   document.getElementById("resample").onclick = () => selectTable(j.db, j.table, true);
 }
 
+async function runQuery() {
+  const sql = document.getElementById("sql").value.trim();
+  const status = document.getElementById("qstatus");
+  const out = document.getElementById("qresult");
+  if (!sql) return;
+  status.textContent = "running…";
+  out.innerHTML = "";
+  try {
+    const res = await fetch("api/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sql, limit: 1000 }),
+    });
+    const j = await res.json();
+    if (j.error) throw new Error(j.error);
+    status.textContent = `${num(j.row_count)} row${j.row_count === 1 ? "" : "s"}`
+      + (j.truncated ? " (truncated)" : "") + ` · ${j.elapsed_ms} ms`;
+    if (!j.columns.length) { out.innerHTML = '<div class="msg">no columns</div>'; return; }
+    const head = j.columns.map((c, i) =>
+      `<th>${esc(c)}<br><span class="dim" style="font-weight:400">${esc(j.types[i])}</span></th>`).join("");
+    const body = j.rows.map(r => `<tr>${r.map(v => `<td>${esc(v)}</td>`).join("")}</tr>`).join("")
+      || `<tr><td colspan="${j.columns.length}" class="dim">0 rows</td></tr>`;
+    out.innerHTML = `<div id="qwrap" class="scroll"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  } catch (e) {
+    status.textContent = "";
+    out.innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+document.getElementById("run").onclick = runQuery;
+document.getElementById("sql").addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); runQuery(); }
+});
 document.getElementById("filter").oninput = () => catalogData && renderTables();
 document.getElementById("reload").onclick = () => { loadHealth(); loadCatalog(); };
 

@@ -12,15 +12,17 @@
 //! single table's schema. It binds only when `[server] http_listen` is set.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use bson::doc;
 use datafusion::arrow::datatypes::{DataType, Field};
+use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
+use datafusion::prelude::SessionContext;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -36,6 +38,8 @@ pub struct AppState {
     pub catalog: Arc<MongoCatalog>,
     pub store: Arc<CatalogStore>,
     pub config: Arc<Config>,
+    /// Shared with the wire server so the query console sees the same tables.
+    pub ctx: Arc<SessionContext>,
     pub started: Instant,
 }
 
@@ -56,6 +60,7 @@ pub async fn serve(addr: String, state: AppState) -> anyhow::Result<()> {
         .route("/api/health", get(health))
         .route("/api/catalog", get(catalog))
         .route("/api/table/{db}/{table}", get(table))
+        .route("/api/query", post(query))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -104,6 +109,7 @@ async fn health(State(st): State<AppState>) -> Json<Value> {
         "sql": {
             "listen": st.config.server.listen,
             "auth": st.config.server.auth,
+            "query_enabled": st.config.server.http_query,
         },
         "catalog": {
             "sample_size": st.config.catalog.sample_size,
@@ -210,4 +216,118 @@ fn field_json(f: &Field) -> Value {
         "nullable": f.is_nullable(),
         "children": children,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct QueryRequest {
+    sql: String,
+    /// Rows to return before truncating. Capped at [`MAX_ROWS`].
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+const DEFAULT_ROWS: usize = 1000;
+const MAX_ROWS: usize = 10_000;
+const FALLBACK_TIMEOUT_SECS: u64 = 30;
+
+/// Read-only SQL, run against the same [`SessionContext`] the wire server uses.
+///
+/// Gated behind `server.http_query` because the UI has no authentication: the
+/// catalog is one thing to expose, arbitrary reads of the data are another. The
+/// gate is the security boundary; the keyword check below is defence in depth
+/// (Auger's tables reject writes anyway) and a guard against multi-statement
+/// smuggling and session-altering `SET`.
+async fn query(State(st): State<AppState>, Json(req): Json<QueryRequest>) -> ApiResult {
+    if !st.config.server.http_query {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "query console is disabled; set server.http_query = true to enable it".into(),
+        ));
+    }
+
+    // One statement, and a read-only one. Strip a single trailing ';' for
+    // convenience, then reject anything with an interior ';'.
+    let sql = req.sql.trim().strip_suffix(';').unwrap_or(req.sql.trim()).trim();
+    if sql.is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "empty query".into()));
+    }
+    if sql.contains(';') {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "one statement at a time".into(),
+        ));
+    }
+    let head = sql.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
+    let read_only = matches!(head.as_str(), "SELECT" | "WITH" | "EXPLAIN" | "SHOW" | "DESCRIBE" | "DESC");
+    if !read_only {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("only read-only statements are allowed here (got `{head}`)"),
+        ));
+    }
+
+    let cap = req.limit.unwrap_or(DEFAULT_ROWS).clamp(1, MAX_ROWS);
+    let timeout = match st.config.server.statement_timeout_secs {
+        0 => FALLBACK_TIMEOUT_SECS,
+        n => n,
+    };
+
+    let ctx = Arc::clone(&st.ctx);
+    let sql_owned = sql.to_string();
+    let bounded = matches!(head.as_str(), "SELECT" | "WITH");
+    let started = Instant::now();
+
+    // Fetch one past the cap so the client can be told the result was truncated.
+    let work = async move {
+        let df = ctx.sql(&sql_owned).await?;
+        let df = if bounded { df.limit(0, Some(cap + 1))? } else { df };
+        df.collect().await
+    };
+
+    let batches = match tokio::time::timeout(Duration::from_secs(timeout), work).await {
+        Err(_) => {
+            return Err(ApiError(
+                StatusCode::GATEWAY_TIMEOUT,
+                format!("query exceeded {timeout}s"),
+            ));
+        }
+        Ok(Err(e)) => return Err(ApiError(StatusCode::BAD_REQUEST, e.to_string())),
+        Ok(Ok(b)) => b,
+    };
+
+    let (columns, types) = match batches.first() {
+        Some(b) => (
+            b.schema().fields().iter().map(|f| f.name().clone()).collect::<Vec<_>>(),
+            b.schema().fields().iter().map(|f| f.data_type().to_string()).collect::<Vec<_>>(),
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
+
+    let opts = FormatOptions::default().with_null("");
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut truncated = false;
+    'batches: for batch in &batches {
+        let fmts = batch
+            .columns()
+            .iter()
+            .map(|c| ArrayFormatter::try_new(c.as_ref(), &opts))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        for r in 0..batch.num_rows() {
+            if rows.len() >= cap {
+                truncated = true;
+                break 'batches;
+            }
+            rows.push(fmts.iter().map(|f| f.value(r).to_string()).collect());
+        }
+    }
+
+    Ok(Json(json!({
+        "columns": columns,
+        "types": types,
+        "rows": rows,
+        "row_count": rows.len(),
+        "truncated": truncated,
+        "elapsed_ms": started.elapsed().as_millis() as u64,
+    })))
 }

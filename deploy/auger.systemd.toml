@@ -44,6 +44,14 @@ statement_timeout_secs = 300
 # if you do, restrict the port the same way 5433 is restricted.
 # http_listen = "127.0.0.1:8080"
 
+# Let that UI also RUN read-only SQL (a query console), not just browse the
+# catalog. Separate from http_listen because the UI has no auth: exposing the
+# catalog is one decision, allowing arbitrary reads of the data is another.
+# Only SELECT/WITH/EXPLAIN/SHOW/DESCRIBE are accepted, results are row-capped,
+# and statement_timeout_secs applies. Leave it off unless the UI is behind a
+# tunnel or a trusted network.
+# http_query = false
+
 # Cleartext, which is why this file is 0640. One account per consumer, so
 # rotating one does not take every dashboard down at once.
 [server.users]
